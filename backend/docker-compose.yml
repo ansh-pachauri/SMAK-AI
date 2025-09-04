@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  pg_shadow:
+    image: postgres:15
+    container_name: smakai_pg_shadow
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: prisma
+      POSTGRES_PASSWORD: prisma
+      POSTGRES_DB: shadowdb
+    ports:
+      - "5433:5432"
+    volumes:
+      - pg_shadow_data:/var/lib/postgresql/data
+
+volumes:
+  pg_shadow_data:
+    driver: local
+
+
