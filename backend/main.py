@@ -8,8 +8,11 @@ from secret import JWT_SECRET
 import jwt
 from app.core.auth import middlware
 from pydantic import BaseModel
-from fastapi import Depends
+from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from app.services.whisper_small import transcribe_audio
+from app.services.retriver import retriver
+from app.services.llm_service import answer_with_context
 
 security = HTTPBearer()
 
@@ -18,7 +21,16 @@ security = HTTPBearer()
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-
+def get_latest_uploaded_file(upload_folder: str):
+    files = [
+        os.path.join(upload_folder, f)
+        for f in os.listdir(upload_folder)
+        if os.path.isfile(os.path.join(upload_folder, f))
+    ]
+    if not files:
+        return None
+    latest_file = max(files, key=os.path.getctime)  # get the most recent by creation time
+    return latest_file
 
 
 
@@ -39,6 +51,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+class QueryRequest(BaseModel):
+    question: str
 
 
 @app.on_event("startup")
@@ -117,6 +132,32 @@ async def whisper(file: UploadFile = File(...)):
         
     text = transcribe_audio(file_path)
     return {"message": "Audio transcribed successfully", "text": text}
+
+
+@app.post("/ask")
+def ask_question(req: QueryRequest):
+    latest_file = get_latest_uploaded_file(UPLOAD_FOLDER)
+    if not latest_file:
+        raise HTTPException(status_code=404, detail="No uploaded audio file found")
+
+    transcript = transcribe_audio(latest_file)
+    print("Transcript fetched")
+    
+    if not transcript:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    
+    doc_retriever = retriver(transcript)
+    print("Retriver fetched")
+    
+    try:
+        answer, context = answer_with_context(doc_retriever, req.question)
+        return {
+            "answer": answer,
+            "context": context
+        }
+        
+    except Exception as e:  
+        raise HTTPException(status_code=500, detail=f"Processing error: {e}")  
 
 @app.get("/health")
 async def health_check():   
