@@ -9,10 +9,14 @@ import jwt
 from app.core.auth import middlware
 from pydantic import BaseModel
 from fastapi import Depends, HTTPException
+from fastapi import Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.services.whisper_small import transcribe_audio
 from app.services.retriver import retriver
 from app.services.llm_service import answer_with_context
+
 
 security = HTTPBearer()
 
@@ -51,6 +55,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    def scrub(value):
+        if isinstance(value, bytes):
+            return f"<{len(value)} bytes>"
+        if isinstance(value, dict):
+            return {k: scrub(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [scrub(v) for v in value]
+        return value
+
+    return JSONResponse(status_code=422, content={"detail": scrub(exc.errors())})
 
 class QueryRequest(BaseModel):
     question: str
@@ -135,29 +152,41 @@ async def whisper(file: UploadFile = File(...)):
 
 
 @app.post("/ask")
-def ask_question(req: QueryRequest):
+async def ask_question(req: QueryRequest, request: Request):
     latest_file = get_latest_uploaded_file(UPLOAD_FOLDER)
     if not latest_file:
         raise HTTPException(status_code=404, detail="No uploaded audio file found")
 
+    # Step 1: Transcribe
     transcript = transcribe_audio(latest_file)
-    print("Transcript fetched")
-    
     if not transcript:
         raise HTTPException(status_code=404, detail="Transcript not found")
-    
-    doc_retriever = retriver(transcript)
-    print("Retriver fetched")
-    
+
+    # Step 2: Get user id from middleware
+    user_id = getattr(request.state, "user_id", None)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Step 3: Save transcript
     try:
+        await prisma.transcript.create(
+            data={
+                "userId": user_id,
+                "content": transcript
+            }
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
+    # Step 4: Retrieve context
+    try:
+        doc_retriever = retriver(transcript)
         answer, context = answer_with_context(doc_retriever, req.question)
-        return {
-            "answer": answer,
-            "context": context
-        }
-        
-    except Exception as e:  
-        raise HTTPException(status_code=500, detail=f"Processing error: {e}")  
+        return {"answer": answer, "context": context}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+    
+    
 
 @app.get("/health")
 async def health_check():   
